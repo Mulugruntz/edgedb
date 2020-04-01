@@ -185,24 +185,28 @@ cdef class Protocol(http.HttpProtocol):
 
         try:
             rewritten = _graphql_rewrite.rewrite(operation_name, query)
+
+            vars = rewritten.variables().copy()
+            if variables:
+                vars.update(variables)
+            # on bad queries the following line can trigger KeyError
+            key_vars = tuple(vars[k] for k in rewritten.key_vars())
         except Exception as e:
             logger.warning("Error rewriting graphql query", e)
             rewritten = None
             rewrite_error = e
             prepared_query = query
             vars = variables.copy() if variables else {}
+            key_vars = ()
         else:
             prepared_query = rewritten.key()
-            vars = rewritten.variables().copy()
-            if variables:
-                vars.update(variables)
 
             if debug.flags.graphql_compile:
                 debug.header('GraphQL optimized query')
                 print(rewritten.key())
                 print(f'variables: {vars}')
 
-        cache_key = (prepared_query, operation_name, dbver)
+        cache_key = (prepared_query, key_vars, operation_name, dbver)
         use_prep_stmt = False
 
         op: compiler.CompiledOperation = self.query_cache.get(
