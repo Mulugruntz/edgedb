@@ -467,7 +467,7 @@ class ShapeElement(OffsetLimitMixin, OrderByMixin, FilterMixin, Expr):
     expr: Path
     elements: typing.List[ShapeElement]
     compexpr: Expr
-    cardinality: qltypes.Cardinality
+    cardinality: qltypes.SchemaCardinality
     required: bool = False
 
 
@@ -715,6 +715,10 @@ class DropAnnotation(DropObject):
     pass
 
 
+class CreatePseudoType(CreateObject):
+    pass
+
+
 class CreateScalarType(CreateExtendingObject):
     pass
 
@@ -743,7 +747,7 @@ class CreateConcretePointer(CreateObject, BasesMixin):
     is_required: bool = False
     declared_overloaded: bool = False
     target: typing.Optional[typing.Union[Expr, TypeExpr]]
-    cardinality: qltypes.Cardinality
+    cardinality: qltypes.SchemaCardinality
 
 
 class CreateConcreteProperty(CreateConcretePointer):
@@ -879,6 +883,7 @@ class Language(s_enum.StrEnum):
 class FunctionCode(Clause):
     language: Language
     code: typing.Optional[str]
+    nativecode: typing.Optional[Expr]
     from_function: typing.Optional[str]
     from_expr: bool
 
@@ -886,6 +891,7 @@ class FunctionCode(Clause):
 class CreateFunction(CreateObject, CallableObject):
     returning: TypeExpr
     code: FunctionCode
+    nativecode: typing.Optional[Expr]
     returning_typemod: qltypes.TypeModifier = qltypes.TypeModifier.SINGLETON
 
 
@@ -1019,7 +1025,7 @@ class Schema(SDL):
 #
 
 
-def get_targets(target: TypeExpr):
+def get_targets(target: typing.Union[None, TypeExpr, Expr]):
     if target is None:
         return []
     elif isinstance(target, TypeOp):

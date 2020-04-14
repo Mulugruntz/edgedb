@@ -88,11 +88,11 @@ class ScalarType(
     def _to_nonpolymorphic(
         self,
         schema: s_schema.Schema,
-        concrete_type: ScalarType,
-    ) -> ScalarType:
+        concrete_type: s_types.Type,
+    ) -> Tuple[s_schema.Schema, s_types.Type]:
         if (not concrete_type.is_polymorphic(schema) and
                 concrete_type.issubclass(schema, self)):
-            return concrete_type
+            return schema, concrete_type
         raise TypeError(
             f'cannot interpret {concrete_type.get_name(schema)} '
             f'as {self.get_name(schema)}')
@@ -102,7 +102,7 @@ class ScalarType(
         schema: s_schema.Schema,
         other: s_types.Type,
     ) -> bool:
-        if other.is_any():
+        if other.is_any(schema):
             return True
         else:
             return self.issubclass(schema, other)
@@ -149,23 +149,26 @@ class ScalarType(
         self,
         other: s_types.Type,
         schema: s_schema.Schema,
-    ) -> Optional[ScalarType]:
+    ) -> Tuple[s_schema.Schema, Optional[ScalarType]]:
 
         if not isinstance(other, ScalarType):
-            return None
+            return schema, None
 
         if self.is_polymorphic(schema) and other.is_polymorphic(schema):
-            return self
+            return schema, self
 
         left = self.get_topmost_concrete_base(schema)
         right = other.get_topmost_concrete_base(schema)
 
         if left == right:
-            return left
+            return schema, left
         else:
-            return cast(
-                Optional[ScalarType],
-                s_casts.find_common_castable_type(schema, left, right),
+            return (
+                schema,
+                cast(
+                    Optional[ScalarType],
+                    s_casts.find_common_castable_type(schema, left, right),
+                )
             )
 
     def get_base_for_cast(self, schema: s_schema.Schema) -> so.Object:

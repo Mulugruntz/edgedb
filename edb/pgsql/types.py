@@ -24,7 +24,6 @@ import functools
 from typing import *
 
 from edb.common import uuidgen
-from edb.edgeql import qltypes
 
 from edb.ir import ast as irast
 from edb.ir import typeutils as irtyputils
@@ -126,13 +125,12 @@ def pg_type_from_scalar(
     if scalar.is_polymorphic(schema):
         return ('anynonarray',)
 
-    scalar = scalar.material_type(schema)
     is_enum = scalar.is_enum(schema)
 
     if is_enum:
         base = scalar
     else:
-        base = get_scalar_base(schema, scalar.material_type(schema))
+        base = get_scalar_base(schema, scalar)
 
     column_type = base_type_name_map.get(scalar.id)
     if column_type:
@@ -151,7 +149,7 @@ def pg_type_from_object(
     if isinstance(obj, s_scalars.ScalarType):
         return pg_type_from_scalar(schema, obj)
 
-    elif obj.is_type() and obj.is_anytuple():
+    elif obj.is_type() and obj.is_anytuple(schema):
         return ('record',)
 
     elif isinstance(obj, s_abc.Tuple):
@@ -175,7 +173,7 @@ def pg_type_from_object(
     elif isinstance(obj, s_objtypes.ObjectType):
         return ('uuid',)
 
-    elif obj.is_type() and obj.is_any():
+    elif obj.is_type() and obj.is_any(schema):
         return ('anyelement',)
 
     else:
@@ -205,8 +203,13 @@ def pg_type_from_ir_typeref(
         return ('record',)
 
     elif irtyputils.is_tuple(ir_typeref):
-        if persistent_tuples or ir_typeref.in_schema:
-            return common.get_tuple_backend_name(ir_typeref.id, catenate=False)
+        if ir_typeref.material_type:
+            material = ir_typeref.material_type
+        else:
+            material = ir_typeref
+
+        if persistent_tuples or material.in_schema:
+            return common.get_tuple_backend_name(material.id, catenate=False)
         else:
             return ('record',)
 
@@ -261,7 +264,7 @@ class _PointerStorageInfo:
         if pointer_target is not None:
             if pointer_target.is_object_type():
                 column_type = ('uuid',)
-            elif pointer_target.is_tuple():
+            elif pointer_target.is_tuple(schema):
                 column_type = common.get_backend_name(schema, pointer_target,
                                                       catenate=False)
             else:
@@ -455,7 +458,7 @@ def get_ptrref_storage_info(
 
 
 def _storable_in_source(ptrref: irast.PointerRef) -> bool:
-    return ptrref.out_cardinality is qltypes.Cardinality.ONE
+    return ptrref.out_cardinality.is_single()
 
 
 def _storable_in_pointer(ptrref: irast.PointerRef) -> bool:
@@ -463,7 +466,7 @@ def _storable_in_pointer(ptrref: irast.PointerRef) -> bool:
         return all(_storable_in_pointer(c) for c in ptrref.union_components)
     else:
         return (
-            ptrref.out_cardinality is qltypes.Cardinality.MANY
+            ptrref.out_cardinality.is_multi()
             or ptrref.has_properties
         )
 
@@ -534,7 +537,7 @@ class TypeDesc:
     @classmethod
     def from_type(cls, schema, type: s_abc.Type) -> TypeDesc:
         nodes = []
-        cls._get_typedesc(schema, [(None, type)], nodes)
+        cls._get_typedesc(schema, [(type.get_name(schema), type)], nodes)
         return cls(nodes)
 
     @classmethod
@@ -564,12 +567,12 @@ class TypeDesc:
                     maintype=t.id, name=tn, collection=t.schema_name,
                     subtypes=subtypes, dimensions=dimensions,
                     position=i if not is_root else None)
-            elif t.is_type() and t.is_any():
+            elif t.is_type() and t.is_any(schema):
                 desc = TypeDescNode(
                     maintype=t.id, name=tn, collection=None,
                     subtypes=[], dimensions=[],
                     position=i if not is_root else None)
-            elif t.is_type() and t.is_anytuple():
+            elif t.is_type() and t.is_anytuple(schema):
                 desc = TypeDescNode(
                     maintype=t.id, name=tn, collection=None,
                     subtypes=[], dimensions=[],

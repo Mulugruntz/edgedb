@@ -597,13 +597,13 @@ def finalize_optional_rel(
 
 def get_set_rel_alias(ir_set: irast.Set, *,
                       ctx: context.CompilerContextLevel) -> str:
+    _, _, dname = ir_set.path_id.target_name_hint.rpartition('::')
     if ir_set.rptr is not None and ir_set.rptr.source.typeref is not None:
         alias_hint = '{}_{}'.format(
-            ir_set.rptr.source.typeref.name_hint.name,
+            dname,
             ir_set.rptr.ptrref.shortname.name
         )
     else:
-        _, _, dname = ir_set.path_id.target_name_hint.rpartition('::')
         alias_hint = dname.replace('~', '-')
 
     return alias_hint
@@ -1230,8 +1230,7 @@ def process_set_as_ifelse(
             stmt, path_id=condition.path_id,
             aspect='value', ctx=newctx)
 
-    if (if_expr_card is qltypes.Cardinality.ONE
-            and else_expr_card is qltypes.Cardinality.ONE
+    if (if_expr_card.is_single() and else_expr_card.is_single()
             and irtyputils.is_scalar(expr.typeref)):
         # For a simple case of singleton scalars on both ends of IF,
         # use a CASE WHEN construct, since it's normally faster than
@@ -1300,7 +1299,7 @@ def process_set_as_coalesce(
         left_ir, right_ir = (a.expr for a in expr.args)
         left_card, right_card = (a.cardinality for a in expr.args)
 
-        if right_card == qltypes.Cardinality.ONE:
+        if right_card.is_single():
             # Singleton RHS, simply use scalar COALESCE.
             left = dispatch.compile(left_ir, ctx=newctx)
 

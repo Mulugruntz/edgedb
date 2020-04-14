@@ -101,6 +101,18 @@ def is_abstract(typeref: irast.TypeRef) -> bool:
     return typeref.is_abstract
 
 
+def is_persistent_tuple(typeref: irast.TypeRef) -> bool:
+    if is_tuple(typeref):
+        if typeref.material_type is not None:
+            material = typeref.material_type
+        else:
+            material = typeref
+
+        return material.in_schema
+    else:
+        return False
+
+
 def type_to_typeref(
     schema: s_schema.Schema,
     t: s_types.Type,
@@ -133,6 +145,7 @@ def type_to_typeref(
     """
 
     result: irast.TypeRef
+    material_type: s_types.Type
 
     if cache is not None and typename is None:
         cached_result = cache.get(t.id)
@@ -142,12 +155,12 @@ def type_to_typeref(
             if cached_result.name_hint == t.get_name(schema):
                 return cached_result
 
-    if t.is_anytuple():
+    if t.is_anytuple(schema):
         result = irast.AnyTupleRef(
             id=t.id,
             name_hint=typename or t.get_name(schema),
         )
-    elif t.is_any():
+    elif t.is_any(schema):
         result = irast.AnyTypeRef(
             id=t.id,
             name_hint=typename or t.get_name(schema),
@@ -179,7 +192,7 @@ def type_to_typeref(
         else:
             intersection = frozenset()
 
-        material_type = t.material_type(schema)
+        schema, material_type = t.material_type(schema)
 
         material_typeref: Optional[irast.TypeRef]
         if material_type is not t:
@@ -235,25 +248,45 @@ def type_to_typeref(
             is_view=t.is_view(schema),
             is_opaque_union=t.get_is_opaque_union(schema),
         )
-    elif isinstance(t, s_types.Tuple) and t.named:
+    elif isinstance(t, s_types.Tuple) and t.is_named(schema):
+        schema, material_type = t.material_type(schema)
+
+        if material_type is not t:
+            material_typeref = type_to_typeref(
+                schema, material_type, cache=cache
+            )
+        else:
+            material_typeref = None
+
         result = irast.TypeRef(
             id=t.id,
             name_hint=typename or t.get_name(schema),
+            material_type=material_typeref,
             element_name=_name,
             collection=t.schema_name,
-            in_schema=schema.get_by_id(t.id, None) is not None,
+            in_schema=t.get_is_persistent(schema),
             subtypes=tuple(
                 type_to_typeref(schema, st, _name=sn)  # note: no cache
                 for sn, st in t.iter_subtypes(schema)
             )
         )
     else:
+        schema, material_type = t.material_type(schema)
+
+        if material_type is not t:
+            material_typeref = type_to_typeref(
+                schema, material_type, cache=cache
+            )
+        else:
+            material_typeref = None
+
         result = irast.TypeRef(
             id=t.id,
             name_hint=typename or t.get_name(schema),
+            material_type=material_typeref,
             element_name=_name,
             collection=t.schema_name,
-            in_schema=schema.get_by_id(t.id, None) is not None,
+            in_schema=t.get_is_persistent(schema),
             subtypes=tuple(
                 type_to_typeref(schema, st, cache=cache)
                 for st in t.get_subtypes(schema)
@@ -274,7 +307,7 @@ def type_to_typeref(
 def ir_typeref_to_type(
     schema: s_schema.Schema,
     typeref: irast.TypeRef,
-) -> s_types.Type:
+) -> Tuple[s_schema.Schema, s_types.Type]:
     """Return a schema type for a given IR TypeRef.
 
     This is the reverse of :func:`~type_to_typeref`.
@@ -287,14 +320,15 @@ def ir_typeref_to_type(
             the corresponding schema type.
 
     Returns:
-        A :class:`schema.types.Type` instance corresponding to the
+        A tuple containing the possibly modified schema and
+        a :class:`schema.types.Type` instance corresponding to the
         given *typeref*.
     """
     if is_anytuple(typeref):
-        return s_pseudo.AnyTuple.get(schema)
+        return schema, s_pseudo.PseudoType.get(schema, 'anytuple')
 
     elif is_any(typeref):
-        return s_pseudo.Any.get(schema)
+        return schema, s_pseudo.PseudoType.get(schema, 'anytype')
 
     elif is_tuple(typeref):
         named = False
@@ -306,7 +340,8 @@ def ir_typeref_to_type(
             else:
                 type_name = str(si)
 
-            tuple_subtypes[type_name] = ir_typeref_to_type(schema, st)
+            schema, st_t = ir_typeref_to_type(schema, st)
+            tuple_subtypes[type_name] = st_t
 
         return s_types.Tuple.from_subtypes(
             schema, tuple_subtypes, {'named': named})
@@ -314,14 +349,15 @@ def ir_typeref_to_type(
     elif is_array(typeref):
         array_subtypes = []
         for st in typeref.subtypes:
-            array_subtypes.append(ir_typeref_to_type(schema, st))
+            schema, st_t = ir_typeref_to_type(schema, st)
+            array_subtypes.append(st_t)
 
         return s_types.Array.from_subtypes(schema, array_subtypes)
 
     else:
         t = schema.get_by_id(typeref.id)
         assert isinstance(t, s_types.Type), 'expected a Type instance'
-        return t
+        return schema, t
 
 
 def ptrref_from_ptrcls(
@@ -362,6 +398,10 @@ def ptrref_from_ptrcls(
 
     ircls: Type[irast.BasePointerRef]
 
+    source_ref: Optional[irast.TypeRef]
+    target_ref: Optional[irast.TypeRef]
+    out_source: Optional[irast.TypeRef]
+
     if isinstance(ptrcls, irast.TupleIndirectionLink):
         ircls = irast.TupleIndirectionPointerRef
     elif isinstance(ptrcls, irast.TypeIntersectionLink):
@@ -379,10 +419,9 @@ def ptrref_from_ptrcls(
     else:
         raise AssertionError(f'unexpected pointer class: {ptrcls}')
 
-    out_source: Optional[irast.TypeRef]
-
     target = ptrcls.get_far_endpoint(schema, direction)
-    if isinstance(target, s_types.Type):
+    if target is not None and not isinstance(target, irast.TypeRef):
+        assert isinstance(target, s_types.Type)
         target_ref = type_to_typeref(schema, target, cache=typeref_cache)
     else:
         target_ref = target
@@ -401,8 +440,11 @@ def ptrref_from_ptrcls(
         )
         source_ref = None
     else:
-        if isinstance(source, s_types.Type):
-            source_ref = type_to_typeref(schema, source, cache=typeref_cache)
+        if source is not None and not isinstance(source, irast.TypeRef):
+            assert isinstance(source, s_types.Type)
+            source_ref = type_to_typeref(schema,
+                                         source,
+                                         cache=typeref_cache)
         else:
             source_ref = source
         source_ptr = None
@@ -414,14 +456,8 @@ def ptrref_from_ptrcls(
         out_source = source_ref
         out_target = target_ref
 
-    out_cardinality = ptrcls.get_cardinality(schema)
-    if out_cardinality is None:
-        # The cardinality is not yet known.
-        dir_cardinality = None
-    elif ptrcls.singular(schema, direction):
-        dir_cardinality = qltypes.Cardinality.ONE
-    else:
-        dir_cardinality = qltypes.Cardinality.MANY
+    out_cardinality, dir_cardinality = cardinality_from_ptrcls(
+        schema, ptrcls, direction=direction)
 
     material_ptrcls = ptrcls.material_type(schema)
     material_ptr: Optional[irast.BasePointerRef]
@@ -443,6 +479,7 @@ def ptrref_from_ptrcls(
         union_ptrs = set()
 
         for component in union_of.objects(schema):
+            assert isinstance(component, s_pointers.Pointer)
             material_comp = component.material_type(schema)
             union_ptrs.add(material_comp)
 
@@ -498,7 +535,6 @@ def ptrref_from_ptrcls(
         union_components=union_components,
         union_is_concrete=union_is_concrete,
         has_properties=ptrcls.has_user_defined_properties(schema),
-        required=ptrcls.get_required(schema),
         dir_cardinality=dir_cardinality,
         out_cardinality=out_cardinality,
     ))
@@ -514,7 +550,7 @@ def ptrref_from_ptrcls(
 def ptrcls_from_ptrref(
     ptrref: irast.BasePointerRef, *,
     schema: s_schema.Schema,
-) -> s_pointers.PointerLike:
+) -> Tuple[s_schema.Schema, s_pointers.PointerLike]:
     """Return a schema pointer for a given IR PointerRef.
 
     This is the reverse of :func:`~type_to_typeref`.
@@ -527,16 +563,19 @@ def ptrcls_from_ptrref(
             the corresponding schema pointer.
 
     Returns:
-        A :class:`schema.pointers.PointerLike` instance corresponding to the
+        A tuple containing the possibly modifed schema and
+        a :class:`schema.pointers.PointerLike` instance corresponding to the
         given *ptrref*.
     """
 
     ptrcls: s_pointers.PointerLike
 
     if isinstance(ptrref, irast.TupleIndirectionPointerRef):
+        schema, src_t = ir_typeref_to_type(schema, ptrref.out_source)
+        schema, tgt_t = ir_typeref_to_type(schema, ptrref.out_target)
         ptrcls = irast.TupleIndirectionLink(
-            source=ir_typeref_to_type(schema, ptrref.out_source),
-            target=ir_typeref_to_type(schema, ptrref.out_target),
+            source=src_t,
+            target=tgt_t,
             element_name=ptrref.name.name,
         )
     elif isinstance(ptrref, irast.TypeIntersectionPointerRef):
@@ -548,7 +587,7 @@ def ptrcls_from_ptrref(
             optional=ptrref.optional,
             is_empty=ptrref.is_empty,
             is_subtype=ptrref.is_subtype,
-            cardinality=ptrref.out_cardinality,
+            cardinality=ptrref.out_cardinality.to_schema_value()[1],
         )
     elif isinstance(ptrref, irast.PointerRef):
         ptr = schema.get_by_id(ptrref.id)
@@ -557,7 +596,39 @@ def ptrcls_from_ptrref(
     else:
         raise TypeError(f'unexpected pointer ref type: {ptrref!r}')
 
-    return ptrcls
+    return schema, ptrcls
+
+
+def cardinality_from_ptrcls(
+    schema: s_schema.Schema,
+    ptrcls: s_pointers.PointerLike,
+    *,
+    direction: s_pointers.PointerDirection = (
+        s_pointers.PointerDirection.Outbound),
+) -> Tuple[Optional[qltypes.Cardinality], Optional[qltypes.Cardinality]]:
+
+    out_card = ptrcls.get_cardinality(schema)
+    required = ptrcls.get_required(schema)
+    if out_card is None:
+        # The cardinality is not yet known.
+        out_cardinality = None
+        dir_cardinality = None
+    else:
+        assert isinstance(out_card, qltypes.SchemaCardinality)
+        out_cardinality = qltypes.Cardinality.from_schema_value(
+            required, out_card)
+        # Determine the cardinality of a given endpoint set.
+        if direction == s_pointers.PointerDirection.Outbound:
+            dir_cardinality = out_cardinality
+        else:
+            # Backward link cannot be required, but exclusivity
+            # controls upper bound on cardinality.
+            if ptrcls.is_exclusive(schema):
+                dir_cardinality = qltypes.Cardinality.AT_MOST_ONE
+            else:
+                dir_cardinality = qltypes.Cardinality.MANY
+
+    return out_cardinality, dir_cardinality
 
 
 def is_id_ptrref(ptrref: irast.BasePointerRef) -> bool:

@@ -93,7 +93,7 @@ def compile_cast(
         return _cast_array_literal(
             ir_set, orig_stype, new_stype, srcctx=srcctx, ctx=ctx)
 
-    elif orig_stype.is_tuple():
+    elif orig_stype.is_tuple(ctx.env.schema):
         return _cast_tuple(
             ir_set, orig_stype, new_stype, srcctx=srcctx, ctx=ctx)
 
@@ -237,6 +237,15 @@ class CastParamListWrapper(s_func.ParameterLikeList):
     ) -> Tuple[s_func.ParameterDesc, ...]:
         return self._params
 
+    def has_required_params(self, schema: s_schema.Schema) -> bool:
+        return True
+
+    def get_in_canonical_order(
+        self,
+        schema: s_schema.Schema,
+    ) -> Tuple[s_func.ParameterDesc, ...]:
+        return self._params
+
 
 class CastCallableWrapper(s_func.CallableLike):
     # A wrapper around a cast object to make it quack like a callable
@@ -252,14 +261,18 @@ class CastCallableWrapper(s_func.CallableLike):
         schema: s_schema.Schema,
     ) -> s_func.ParameterLikeList:
         from_type_param = s_func.ParameterDesc(
-            num=0, name='val', type=self._cast.get_from_type(schema),
+            num=0,
+            name='val',
+            type=self._cast.get_from_type(schema).as_shell(schema),
             typemod=ft.TypeModifier.SINGLETON,
             kind=ft.ParameterKind.POSITIONAL,
             default=None,
         )
 
         to_type_param = s_func.ParameterDesc(
-            num=0, name='_', type=self._cast.get_to_type(schema),
+            num=0,
+            name='_',
+            type=self._cast.get_to_type(schema).as_shell(schema),
             typemod=ft.TypeModifier.SINGLETON,
             kind=ft.ParameterKind.POSITIONAL,
             default=None,
@@ -353,12 +366,15 @@ def _cast_tuple(
             elements.append(irast.TupleElement(name=n, val=val))
 
         new_tuple = setgen.new_tuple_set(
-            elements, named=orig_stype.named, ctx=ctx)
+            elements,
+            named=orig_stype.is_named(ctx.env.schema),
+            ctx=ctx,
+        )
 
         return _cast_to_ir(
             new_tuple, direct_cast, orig_stype, new_stype, ctx=ctx)
 
-    if not new_stype.is_tuple():
+    if not new_stype.is_tuple(ctx.env.schema):
         raise errors.QueryError(
             f'cannot cast {orig_stype.get_displayname(ctx.env.schema)!r} '
             f'to {new_stype.get_displayname(ctx.env.schema)!r}',
@@ -391,7 +407,11 @@ def _cast_tuple(
 
         elements.append(irast.TupleElement(name=new_el_name, val=val))
 
-    return setgen.new_tuple_set(elements, named=new_stype.named, ctx=ctx)
+    return setgen.new_tuple_set(
+        elements,
+        named=new_stype.is_named(ctx.env.schema),
+        ctx=ctx,
+    )
 
 
 def _cast_array(
@@ -455,7 +475,7 @@ def _cast_array(
             assert isinstance(array_ir, irast.Set)
 
             if direct_cast is not None:
-                array_stype = s_types.Array.from_subtypes(
+                ctx.env.schema, array_stype = s_types.Array.from_subtypes(
                     ctx.env.schema, [el_type])
                 return _cast_to_ir(
                     array_ir, direct_cast, array_stype, new_stype, ctx=ctx

@@ -304,7 +304,7 @@ class GQLCoreSchema:
             if name in self._gql_enums:
                 target = self._gql_enums.get(name)
 
-        elif edb_target.is_tuple():
+        elif edb_target.is_tuple(self.edb_schema):
             edb_typename = edb_target.get_verbosename(self.edb_schema)
             raise g_errors.GraphQLCoreError(
                 f"Could not convert {edb_typename} to a GraphQL type.")
@@ -960,8 +960,7 @@ class GQLCoreSchema:
 
         else:
             edb_base = name
-            edb_base_name = edb_base.get_name(self.edb_schema)
-            name = f'{edb_base_name.module}::{edb_base_name.name}'
+            name = edb_base.get_name(self.edb_schema)
 
         if not name.startswith('stdgraphql::'):
             if edb_base is None:
@@ -1017,7 +1016,7 @@ class GQLBaseType(metaclass=GQLTypeMeta):
 
         # __typename
         if name is None:
-            self._name = f'{edb_base_name.module}::{edb_base_name.name}'
+            self._name = edb_base_name
         else:
             self._name = name
         # determine module from name if not already specified
@@ -1240,7 +1239,7 @@ class GQLBaseType(metaclass=GQLTypeMeta):
 
         ptr = self.edb_base.getptr(self.edb_schema, name)
         if not ptr.singular(self.edb_schema):
-            return qltypes.Cardinality.MANY
+            return qltypes.SchemaCardinality.MANY
 
         return None
 

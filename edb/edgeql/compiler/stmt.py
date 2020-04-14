@@ -288,15 +288,18 @@ def compile_InsertQuery(
         stmt_subject_stype = setgen.get_set_type(subject, ctx=ictx)
 
         result = setgen.class_set(
-            stmt_subject_stype.material_type(ctx.env.schema),
-            path_id=stmt.subject.path_id, ctx=ctx)
+            schemactx.get_material_type(stmt_subject_stype, ctx=ctx),
+            path_id=stmt.subject.path_id,
+            ctx=ctx,
+        )
 
         stmt.result = compile_query_subject(
             result,
             view_scls=ctx.view_scls,
             view_name=ctx.toplevel_result_view_name,
             compile_views=ictx.stmt is ictx.toplevel_stmt,
-            ctx=ictx)
+            ctx=ictx,
+        )
 
         result = fini_stmt(stmt, expr, ctx=ictx, parent_ctx=ctx)
 
@@ -349,15 +352,18 @@ def compile_UpdateQuery(
         stmt_subject_stype = setgen.get_set_type(subject, ctx=ictx)
 
         result = setgen.class_set(
-            stmt_subject_stype.material_type(ctx.env.schema),
-            path_id=stmt.subject.path_id, ctx=ctx)
+            schemactx.get_material_type(stmt_subject_stype, ctx=ctx),
+            path_id=stmt.subject.path_id,
+            ctx=ctx,
+        )
 
         stmt.result = compile_query_subject(
             result,
             view_scls=ctx.view_scls,
             view_name=ctx.toplevel_result_view_name,
             compile_views=ictx.stmt is ictx.toplevel_stmt,
-            ctx=ictx)
+            ctx=ictx,
+        )
 
         result = fini_stmt(stmt, expr, ctx=ictx, parent_ctx=ctx)
 
@@ -433,15 +439,18 @@ def compile_DeleteQuery(
 
         stmt_subject_stype = setgen.get_set_type(subject, ctx=ictx)
         result = setgen.class_set(
-            stmt_subject_stype.material_type(ctx.env.schema),
-            path_id=stmt.subject.path_id, ctx=ctx)
+            schemactx.get_material_type(stmt_subject_stype, ctx=ctx),
+            path_id=stmt.subject.path_id,
+            ctx=ctx,
+        )
 
         stmt.result = compile_query_subject(
             result,
             view_scls=ctx.view_scls,
             view_name=ctx.toplevel_result_view_name,
             compile_views=ictx.stmt is ictx.toplevel_stmt,
-            ctx=ictx)
+            ctx=ictx,
+        )
 
         result = fini_stmt(stmt, expr, ctx=ictx, parent_ctx=ctx)
 
@@ -578,9 +587,8 @@ def init_stmt(
     ctx.stmt = irstmt
     if ctx.toplevel_stmt is None:
         parent_ctx.toplevel_stmt = ctx.toplevel_stmt = irstmt
-        ctx.path_scope = parent_ctx.path_scope
-    else:
-        ctx.path_scope = parent_ctx.path_scope.attach_fence()
+
+    ctx.path_scope = parent_ctx.path_scope.attach_fence()
 
     pending_own_ns = parent_ctx.pending_stmt_own_path_id_namespace
     if pending_own_ns:

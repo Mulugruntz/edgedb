@@ -28,11 +28,16 @@ import uuid
 from edb import errors
 
 from edb.common import adapter
+from edb.common import checked
+from edb.common import markup
+from edb.common import ordered
 from edb.common import parsing
+from edb.common import struct
+
 from edb.edgeql import ast as qlast
+from edb.edgeql import compiler as qlcompiler
 from edb.edgeql import qltypes
 
-from edb.common import checked, markup, ordered, struct
 
 from . import expr as s_expr
 from . import name as sn
@@ -164,21 +169,33 @@ class Command(struct.MixedStruct, metaclass=CommandMeta):
         if isinstance(value, so.Shell):
             value = value.resolve(schema)
         else:
-            if isinstance(ftype, so.ObjectMeta) and False:
-                value = self._resolve_type_ref(value, schema)
+            if issubclass(ftype, so.ObjectDict):
+                if isinstance(value, so.ObjectDict):
+                    items = dict(value.items(schema))
+                elif isinstance(value, collections.abc.Mapping):
+                    items = {}
+                    for k, v in value.items():
+                        if isinstance(v, so.Shell):
+                            val = v.resolve(schema)
+                        else:
+                            val = v
+                        items[k] = val
 
-            elif issubclass(ftype, checked.CheckedDict):
-                value = field.coerce_value(schema, value)
-
-            elif issubclass(ftype, (checked.AbstractCheckedList,
-                                    checked.AbstractCheckedSet)):
-                value = field.coerce_value(schema, value)
-
-            elif issubclass(ftype, so.ObjectDict):
-                value = ftype.create(schema, dict(value.items(schema)))
+                value = ftype.create(schema, items)
 
             elif issubclass(ftype, so.ObjectCollection):
-                value = ftype.create(schema, value.objects(schema))
+                sequence: Sequence[so.Object]
+                if isinstance(value, so.ObjectCollection):
+                    sequence = value.objects(schema)
+                else:
+                    sequence = []
+                    for v in value:
+                        if isinstance(v, so.Shell):
+                            val = v.resolve(schema)
+                        else:
+                            val = v
+                        sequence.append(val)
+                value = ftype.create(schema, sequence)
 
             elif issubclass(ftype, s_expr.Expression):
                 if value is not None:
@@ -422,8 +439,6 @@ class Command(struct.MixedStruct, metaclass=CommandMeta):
         astnode: qlast.DDLOperation,
         name: str,
     ) -> Optional[str]:
-        from edb.edgeql import compiler as qlcompiler
-
         orig_text_expr = qlast.get_ddl_field_value(astnode, f'orig_{name}')
         if orig_text_expr:
             orig_text = qlcompiler.evaluate_ast_to_python_val(
@@ -1072,7 +1087,7 @@ class ObjectCommand(
             if subnode is not None:
                 node.commands.append(subnode)
 
-    def get_ast_attr_for_field(self, field: so.Field[Any]) -> Optional[str]:
+    def get_ast_attr_for_field(self, field: str) -> Optional[str]:
         return None
 
     @classmethod
@@ -1161,6 +1176,13 @@ class ObjectCommand(
 
         return result
 
+    def resolve_refs(
+        self,
+        schema: s_schema.Schema,
+        context: CommandContext,
+    ) -> s_schema.Schema:
+        return schema
+
     def get_resolved_attribute_value(
         self,
         attr_name: str,
@@ -1191,6 +1213,18 @@ class ObjectCommand(
             context.cache_value((self, 'attribute', attr_name), value)
 
         return value
+
+    def get_attributes(
+        self,
+        schema: s_schema.Schema,
+        context: CommandContext,
+    ) -> Dict[str, Any]:
+        result = {}
+
+        for attr in self.enumerate_attributes():
+            result[attr] = self.get_attribute_value(attr)
+
+        return result
 
     def get_resolved_attributes(
         self,
@@ -1413,6 +1447,9 @@ class CreateObject(ObjectCommand[so.Object_T], Generic[so.Object_T]):
             if specified_id is not None:
                 self.set_attribute_value('id', specified_id)
 
+        if not context.canonical:
+            schema = self.resolve_refs(schema, context)
+
         props = self.get_resolved_attributes(schema, context)
         metaclass = self.get_schema_metaclass()
         schema, self.scls = metaclass.create_in_schema(schema, **props)
@@ -1510,6 +1547,8 @@ class AlterObjectFragment(ObjectCommand[so.Object]):
         schema: s_schema.Schema,
         context: CommandContext,
     ) -> s_schema.Schema:
+        if not context.canonical:
+            schema = self.resolve_refs(schema, context)
         props = self.get_resolved_attributes(schema, context)
         schema = self.scls.update(schema, props)
         return schema
@@ -2007,7 +2046,6 @@ class AlterObjectProperty(Command):
         astnode: qlast.DDLOperation,
         context: CommandContext,
     ) -> AlterObjectProperty:
-        from edb.edgeql import compiler as qlcompiler
         assert isinstance(astnode, qlast.BaseSetField)
 
         propname = astnode.name

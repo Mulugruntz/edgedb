@@ -101,7 +101,7 @@ def _process_view(
         is_update: bool=False,
         ctx: context.ContextLevel) -> s_objtypes.ObjectType:
 
-    if (view_name is None and ctx.env.schema_view_mode
+    if (view_name is None and ctx.env.options.schema_view_mode
             and view_rptr is not None):
         # Make sure persistent schema expression aliases have properly formed
         # names as opposed to the usual mangled form of the ephemeral
@@ -364,6 +364,7 @@ def _normalize_view_ptr_expr(
             ctx.pointer_derivation_map[base_ptrcls].append(ptrcls)
             stmtctx.pend_pointer_cardinality_inference(
                 ptrcls=ptrcls,
+                specified_required=shape_el.required,
                 specified_card=shape_el.cardinality,
                 source_ctx=shape_el.context,
                 ctx=ctx)
@@ -480,12 +481,13 @@ def _normalize_view_ptr_expr(
                 # paths.
                 src_path_id = path_id.src_path()
                 assert src_path_id is not None
+                ctx.env.schema, src_t = irtyputils.ir_typeref_to_type(
+                    shape_expr_ctx.env.schema,
+                    src_path_id.target,
+                )
                 prefix_rptr = irast.Pointer(
                     source=setgen.class_set(
-                        irtyputils.ir_typeref_to_type(
-                            shape_expr_ctx.env.schema,
-                            src_path_id.target,
-                        ),
+                        src_t,
                         path_id=src_path_id,
                         ctx=shape_expr_ctx,
                     ),
@@ -514,8 +516,10 @@ def _normalize_view_ptr_expr(
         ptr_cardinality = None
         ptr_target = inference.infer_type(irexpr, ctx.env)
 
-        if (isinstance(ptr_target, s_types.Collection)
-                and not ctx.env.schema.get_by_id(ptr_target.id, default=None)):
+        if (
+            isinstance(ptr_target, s_types.Collection)
+            and not ctx.env.orig_schema.get_by_id(ptr_target.id, default=None)
+        ):
             # Record references to implicitly defined collection types,
             # so that the alias delta machinery can pick them up.
             ctx.env.created_schema_objects.add(ptr_target)
@@ -687,13 +691,18 @@ def _normalize_view_ptr_expr(
                 ctx.pointer_derivation_map[base_ptrcls].append(ptrcls)
 
             base_cardinality = None
+            base_required = False
             if base_ptrcls is not None and not base_ptrcls_is_alias:
                 base_cardinality = base_ptrcls.get_cardinality(ctx.env.schema)
+                base_required = base_ptrcls.get_required(ctx.env.schema)
 
             if base_cardinality is None:
                 specified_cardinality = shape_el.cardinality
+                specified_required = shape_el.required
             else:
                 specified_cardinality = base_cardinality
+                specified_required = base_required
+
                 if (shape_el.cardinality is not None
                         and base_ptrcls is not None
                         and shape_el.cardinality != base_cardinality):
@@ -707,9 +716,12 @@ def _normalize_view_ptr_expr(
                         f'in the base {base_src_name}',
                         context=compexpr.context,
                     )
+                # The required flag may be inherited from the base
+                specified_required = shape_el.required or base_required
 
             stmtctx.pend_pointer_cardinality_inference(
                 ptrcls=ptrcls,
+                specified_required=specified_required,
                 specified_card=specified_cardinality,
                 source_ctx=shape_el.context,
                 ctx=ctx,
@@ -921,36 +933,40 @@ def _get_shape_configuration(
     if implicit_tid:
         assert isinstance(stype, s_objtypes.ObjectType)
 
-        ql = qlast.ShapeElement(
-            expr=qlast.Path(
-                steps=[qlast.Ptr(
-                    ptr=qlast.ObjectRef(name='__tid__'),
-                    direction=s_pointers.PointerDirection.Outbound,
-                )],
-            ),
-            compexpr=qlast.Path(
-                steps=[
-                    qlast.Source(),
-                    qlast.Ptr(
-                        ptr=qlast.ObjectRef(name='__type__'),
+        try:
+            ptr = setgen.resolve_ptr(stype, '__tid__', ctx=ctx)
+        except errors.InvalidReferenceError:
+            ql = qlast.ShapeElement(
+                expr=qlast.Path(
+                    steps=[qlast.Ptr(
+                        ptr=qlast.ObjectRef(name='__tid__'),
                         direction=s_pointers.PointerDirection.Outbound,
-                    ),
-                    qlast.Ptr(
-                        ptr=qlast.ObjectRef(name='id'),
-                        direction=s_pointers.PointerDirection.Outbound,
-                    )
-                ]
+                    )],
+                ),
+                compexpr=qlast.Path(
+                    steps=[
+                        qlast.Source(),
+                        qlast.Ptr(
+                            ptr=qlast.ObjectRef(name='__type__'),
+                            direction=s_pointers.PointerDirection.Outbound,
+                        ),
+                        qlast.Ptr(
+                            ptr=qlast.ObjectRef(name='id'),
+                            direction=s_pointers.PointerDirection.Outbound,
+                        )
+                    ]
+                )
             )
-        )
-        with ctx.newscope(fenced=True) as scopectx:
-            scopectx.anchors = scopectx.anchors.copy()
-            scopectx.anchors[qlast.Source().name] = ir_set
-            ptr = _normalize_view_ptr_expr(
-                ql, stype, path_id=ir_set.path_id, ctx=scopectx)
-            view_shape = ctx.env.view_shapes[stype]
-            if ptr not in view_shape:
-                view_shape.insert(0, ptr)
-                shape_ptrs.insert(0, (ir_set, ptr))
+            with ctx.newscope(fenced=True) as scopectx:
+                scopectx.anchors = scopectx.anchors.copy()
+                scopectx.anchors[qlast.Source().name] = ir_set
+                ptr = _normalize_view_ptr_expr(
+                    ql, stype, path_id=ir_set.path_id, ctx=scopectx)
+
+        view_shape = ctx.env.view_shapes[stype]
+        if ptr not in view_shape:
+            view_shape.insert(0, ptr)
+            shape_ptrs.insert(0, (ir_set, ptr))
 
     return shape_ptrs
 

@@ -79,7 +79,7 @@ def new_empty_set(*, stype: Optional[s_types.Type]=None, alias: str,
                   srcctx: Optional[
                       parsing.ParserContext]=None) -> irast.Set:
     if stype is None:
-        stype = s_pseudo.Any.get(ctx.env.schema)
+        stype = s_pseudo.PseudoType.get(ctx.env.schema, 'anytype')
         if srcctx is not None:
             ctx.env.type_origins[stype] = srcctx
 
@@ -164,8 +164,9 @@ def new_array_set(
     if elements:
         stype = inference.infer_type(arr, env=ctx.env)
     else:
-        anytype = s_pseudo.Any.get(ctx.env.schema)
-        stype = s_types.Array.from_subtypes(ctx.env.schema, [anytype])
+        anytype = s_pseudo.PseudoType.get(ctx.env.schema, 'anytype')
+        ctx.env.schema, stype = s_types.Array.from_subtypes(
+            ctx.env.schema, [anytype])
         if srcctx is not None:
             ctx.env.type_origins[anytype] = srcctx
 
@@ -601,6 +602,7 @@ def extend_path(
     else:
         if direction is not s_pointers.PointerDirection.Inbound:
             source = ptrcls.get_near_endpoint(ctx.env.schema, direction)
+            assert isinstance(source, s_types.Type)
             stype = get_set_type(source_set, ctx=ctx)
             if not stype.issubclass(ctx.env.schema, source):
                 # Polymorphic link reference
@@ -615,6 +617,7 @@ def extend_path(
         ns=ctx.path_id_namespace, ctx=ctx)
 
     target = ptrcls.get_far_endpoint(ctx.env.schema, direction)
+    assert isinstance(target, s_types.Type)
     target_set = new_set(stype=target, path_id=path_id, ctx=ctx)
 
     ptr = irast.Pointer(
@@ -718,7 +721,7 @@ def type_intersection_set(
         # route link property references accordingly.
         for component in rptr.ptrref.union_components:
             component_endpoint_ref = component.dir_target
-            component_endpoint = irtyputils.ir_typeref_to_type(
+            ctx.env.schema, component_endpoint = irtyputils.ir_typeref_to_type(
                 ctx.env.schema, component_endpoint_ref)
             if component_endpoint.issubclass(ctx.env.schema, stype):
                 assert isinstance(component, irast.PointerRef)
@@ -734,7 +737,7 @@ def type_intersection_set(
         # The type intersection cannot increase the cardinality
         # of the input set, so semantically, the cardinality
         # of the type intersection "link" is, at most, ONE.
-        cardinality=qltypes.Cardinality.ONE,
+        cardinality=qltypes.SchemaCardinality.ONE,
     )
 
     ptrref = irtyputils.ptrref_from_ptrcls(
@@ -857,7 +860,7 @@ def ensure_set(
         stype = type_override
 
     if (isinstance(ir_set, irast.EmptySet)
-            and (stype is None or stype.is_any())
+            and (stype is None or stype.is_any(ctx.env.schema))
             and typehint is not None):
         inference.amend_empty_set_type(ir_set, typehint, env=ctx.env)
         stype = get_set_type(ir_set, ctx=ctx)

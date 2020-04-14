@@ -61,9 +61,9 @@ def get_schema_object(
         module = name.module
         name = name.name
     elif isinstance(name, qlast.AnyType):
-        return s_pseudo.Any.get(ctx.env.schema)
+        return s_pseudo.PseudoType.get(ctx.env.schema, 'anytype')
     elif isinstance(name, qlast.AnyTuple):
-        return s_pseudo.AnyTuple.get(ctx.env.schema)
+        return s_pseudo.PseudoType.get(ctx.env.schema, 'anytuple')
     elif isinstance(name, qlast.BaseObjectRef):
         raise AssertionError(f"Unhandled BaseObjectRef subclass: {name!r}")
 
@@ -244,8 +244,8 @@ def derive_ptr(
     ctx.env.schema, derived = ptr.derive_ref(
         ctx.env.schema,
         source,
-        target,
         *qualifiers,
+        target=target,
         name=derived_name,
         inheritance_merge=inheritance_merge,
         refdict_whitelist={'pointers'},
@@ -348,6 +348,16 @@ def get_intersection_type(
     return intersection
 
 
+def get_material_type(
+    t: s_types.TypeT,
+    *,
+    ctx: context.ContextLevel,
+) -> s_types.TypeT:
+
+    ctx.env.schema, mtype = t.material_type(ctx.env.schema)
+    return mtype
+
+
 class TypeIntersectionResult(NamedTuple):
 
     stype: s_types.Type
@@ -435,9 +445,9 @@ def derive_dummy_ptr(
         ctx.env.schema, derived = ptr.derive_ref(
             ctx.env.schema,
             derived_obj,
-            derived_obj,
+            target=derived_obj,
             attrs={
-                'cardinality': qltypes.Cardinality.MANY,
+                'cardinality': qltypes.SchemaCardinality.MANY,
             },
             name=derived_name,
             mark_derived=True)
@@ -475,8 +485,8 @@ def is_type_compatible(
     ctx: context.ContextLevel,
 ) -> bool:
 
-    material_type_a = type_a.material_type(ctx.env.schema)
-    material_type_b = type_b.material_type(ctx.env.schema)
+    material_type_a = get_material_type(type_a, ctx=ctx)
+    material_type_b = get_material_type(type_b, ctx=ctx)
 
     compatible = material_type_b.issubclass(ctx.env.schema, material_type_a)
     if compatible:

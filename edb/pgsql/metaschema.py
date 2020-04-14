@@ -34,7 +34,6 @@ from edb.common import uuidgen
 
 from edb.edgeql import qltypes
 
-from edb.schema import abc as s_abc
 from edb.schema import constraints as s_constraints
 from edb.schema import database as s_db
 from edb.schema import expr as s_expr
@@ -42,8 +41,6 @@ from edb.schema import migrations  # NoQA
 from edb.schema import modules as s_mod
 from edb.schema import name as sn
 from edb.schema import objects as s_obj
-from edb.schema import pseudo as s_pseudo
-from edb.schema import types as s_types
 
 from edb.server import defines
 
@@ -2039,10 +2036,6 @@ def get_interesting_metaclasses():
         if isinstance(mcls, adapter.Adapter):
             continue
 
-        if (issubclass(mcls, s_abc.Collection)
-                and not issubclass(mcls, s_types.SchemaCollection)):
-            continue
-
         metaclasses.append(mcls)
 
     return metaclasses
@@ -2102,22 +2095,6 @@ init_metaclass_tables()
 
 def get_metaclass_table(mcls):
     return metaclass_tables[mcls]
-
-
-def make_register_any_command():
-    pseudo_type_table = get_metaclass_table(s_pseudo.PseudoType)
-
-    anytype = pseudo_type_table.record
-    anytype.ancestors = None
-    anytype.id = s_obj.get_known_type_id('anytype')
-    anytype.name = 'anytype'
-
-    anytuple = pseudo_type_table.record
-    anytuple.ancestors = None
-    anytuple.id = s_obj.get_known_type_id('anytuple')
-    anytuple.name = 'anytuple'
-
-    return dbops.Insert(table=pseudo_type_table, records=[anytype, anytuple])
 
 
 async def bootstrap(conn):
@@ -2200,9 +2177,6 @@ async def bootstrap(conn):
         dbops.CreateFunction(SysVersionFunction()),
         dbops.CreateFunction(SysGetTransactionIsolation()),
     ])
-
-    # Register "any" pseudo-type.
-    commands.add_command(make_register_any_command())
 
     block = dbops.PLTopBlock(disable_ddl_triggers=True)
     commands.generate(block)
@@ -2529,24 +2503,6 @@ def _generate_type_element_view(schema, type_fields):
             types AS q
         WHERE
             q.position IS NOT NULL
-
-        UNION ALL
-
-        SELECT
-            st.id           AS id,
-            (SELECT id FROM edgedb.Object
-                 WHERE name = 'schema::TypeElement')
-                            AS __type__,
-            st.maintype     AS type,
-            st.name         AS name,
-            st.position     AS num
-        FROM
-            edgedb.TupleExprAlias AS q,
-            LATERAL UNNEST ((q.element_types).types) AS st(
-                id, maintype, name, position
-            )
-        WHERE
-            st.position IS NOT NULL
     '''
 
     return dbops.View(name=tabname(schema, TypeElement), query=view_query)
@@ -2765,7 +2721,7 @@ def _build_key_expr(key_components):
 def _build_data_source(schema, rptr, source_idx, *, alias=None):
 
     rptr_name = rptr.get_shortname(schema).name
-    rptr_multi = rptr.get_cardinality(schema) is qltypes.Cardinality.MANY
+    rptr_multi = rptr.get_cardinality(schema) is qltypes.SchemaCardinality.MANY
 
     if alias is None:
         alias = f'q{source_idx + 1}'
@@ -2813,7 +2769,7 @@ def _generate_config_type_view(schema, stype, *, path, rptr, _memo=None):
                 FROM edgedb._read_sys_config() cfg) AS q0''')
         else:
             rptr_multi = (
-                rptr.get_cardinality(schema) is qltypes.Cardinality.MANY)
+                rptr.get_cardinality(schema) is qltypes.SchemaCardinality.MANY)
 
             rptr_name = rptr.get_shortname(schema).name
 
@@ -2838,7 +2794,8 @@ def _generate_config_type_view(schema, stype, *, path, rptr, _memo=None):
         key_start = 0
 
         for i, (l, exc_props) in enumerate(path):
-            l_multi = l.get_cardinality(schema) is qltypes.Cardinality.MANY
+            l_multi = (l.get_cardinality(schema) is
+                       qltypes.SchemaCardinality.MANY)
             l_name = l.get_shortname(schema).name
 
             if i == 0:
@@ -2896,7 +2853,7 @@ def _generate_config_type_view(schema, stype, *, path, rptr, _memo=None):
 
         pp_type = pp.get_target(schema)
         pp_multi = (
-            pp.get_cardinality(schema) is qltypes.Cardinality.MANY
+            pp.get_cardinality(schema) is qltypes.SchemaCardinality.MANY
         )
 
         if pp_type.is_object_type():

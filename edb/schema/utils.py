@@ -33,6 +33,7 @@ from . import name as sn
 from . import objects as so
 
 if TYPE_CHECKING:
+    from . import objtypes as s_objtypes
     from . import schema as s_schema
     from . import types as s_types
 
@@ -68,7 +69,7 @@ def ast_objref_to_object_shell(
     return so.ObjectShell(
         name=name,
         origname=lname,
-        schemaclass=metaclass,
+        schemaclass=metaclass or so.Object,
         sourcectx=node.context,
     )
 
@@ -190,6 +191,19 @@ def ast_to_type_shell(
                     )
                 )
 
+            if len(subtypes_list) != 1:
+                raise errors.SchemaError(
+                    f'unexpected number of subtypes,'
+                    f' expecting 1, got {len(subtypes_list)}',
+                    context=node.context,
+                )
+
+            if isinstance(subtypes_list[0], s_types.ArrayTypeShell):
+                raise errors.UnsupportedFeatureError(
+                    'nested arrays are not supported',
+                    context=node.subtypes[0].context,
+                )
+
             try:
                 return coll.create_shell(
                     schema,
@@ -201,11 +215,11 @@ def ast_to_type_shell(
 
     elif isinstance(node.maintype, qlast.AnyType):
         from . import pseudo as s_pseudo
-        return s_pseudo.AnyTypeShell()
+        return s_pseudo.PseudoTypeShell(name='anytype')
 
     elif isinstance(node.maintype, qlast.AnyTuple):
         from . import pseudo as s_pseudo
-        return s_pseudo.AnyTupleShell()
+        return s_pseudo.PseudoTypeShell(name='anytuple')
 
     assert isinstance(node.maintype, qlast.ObjectRef)
 
@@ -273,11 +287,11 @@ def typeref_to_ast(
     result: qlast.TypeExpr
     components: Tuple[so.Object, ...]
 
-    if t.is_type() and cast(s_types.Type, t).is_any():
+    if t.is_type() and cast(s_types.Type, t).is_any(schema):
         result = qlast.TypeName(name=_name, maintype=qlast.AnyType())
-    elif t.is_type() and cast(s_types.Type, t).is_anytuple():
+    elif t.is_type() and cast(s_types.Type, t).is_anytuple(schema):
         result = qlast.TypeName(name=_name, maintype=qlast.AnyTuple())
-    elif isinstance(t, s_types.Tuple) and t.named:
+    elif isinstance(t, s_types.Tuple) and t.is_named(schema):
         result = qlast.TypeName(
             name=_name,
             maintype=qlast.ObjectRef(
@@ -700,8 +714,9 @@ def ensure_union_type(
         uniontype: s_types.Type = components_list[0]
         for t1 in components_list[1:]:
 
-            common_type = uniontype.find_common_implicitly_castable_type(
-                t1, schema)
+            schema, common_type = (
+                uniontype.find_common_implicitly_castable_type(t1, schema)
+            )
 
             if common_type is None:
                 raise _union_error(schema, components_list)
@@ -858,3 +873,75 @@ def const_ast_from_python(val: Any) -> qlast.BaseConstant:
         return qlast.BytesConstant.from_python(val)
     else:
         raise ValueError(f'unexpected constant type: {type(val)!r}')
+
+
+def get_config_type_shape(
+    schema: s_schema.Schema,
+    stype: s_objtypes.ObjectType,
+    path: List[qlast.Base],
+) -> List[qlast.ShapeElement]:
+    shape = []
+    seen: Set[str] = set()
+
+    stypes = [stype] + list(stype.descendants(schema))
+
+    for t in stypes:
+        t_name = t.get_name(schema)
+
+        for pn, p in t.get_pointers(schema).items(schema):
+            if pn in ('id', '__type__') or pn in seen:
+                continue
+
+            elem_path: List[qlast.Base] = []
+
+            if t is not stype:
+                elem_path.append(
+                    qlast.TypeIntersection(
+                        type=qlast.TypeName(
+                            maintype=qlast.ObjectRef(
+                                module=t_name.module,
+                                name=t_name.name,
+                            ),
+                        ),
+                    ),
+                )
+
+            elem_path.append(qlast.Ptr(ptr=qlast.ObjectRef(name=pn)))
+
+            ptype = p.get_target(schema)
+
+            if ptype.is_object_type():
+                subshape = get_config_type_shape(
+                    schema, ptype, path + elem_path)
+                subshape.append(
+                    qlast.ShapeElement(
+                        expr=qlast.Path(
+                            steps=[
+                                qlast.Ptr(
+                                    ptr=qlast.ObjectRef(name='_tname'),
+                                ),
+                            ],
+                        ),
+                        compexpr=qlast.Path(
+                            steps=path + elem_path + [
+                                qlast.Ptr(
+                                    ptr=qlast.ObjectRef(name='__type__')),
+                                qlast.Ptr(
+                                    ptr=qlast.ObjectRef(name='name')),
+                            ],
+                        ),
+                    ),
+                )
+            else:
+                subshape = []
+
+            shape.append(
+                qlast.ShapeElement(
+                    expr=qlast.Path(steps=elem_path),
+                    elements=subshape,
+                ),
+            )
+
+            seen.add(pn)
+
+    return shape
